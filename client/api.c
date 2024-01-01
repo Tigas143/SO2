@@ -15,14 +15,14 @@ char *req_pipe_path_g = NULL;
 char *resp_pipe_path_g = NULL;
 
 
-int read_response(char* response, size_t response_size) {
+int read_response(int* response) {
     int resp_pipe_fd = open(resp_pipe_path_g, O_RDONLY);
     if (resp_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
         return 1;
     }
 
-    ssize_t bytes_read = read(resp_pipe_fd, response, response_size - 1);
+    ssize_t bytes_read = read(resp_pipe_fd, response, sizeof(int));
     close(resp_pipe_fd);
 
     if (bytes_read == -1) {
@@ -30,8 +30,6 @@ int read_response(char* response, size_t response_size) {
         return 1;
     }
 
-    // Null-terminate the response string
-    response[bytes_read] = '\0';
 
     return 0;
 }
@@ -147,8 +145,8 @@ int ems_create(unsigned int event_id, size_t num_rows, size_t num_cols) {
     }
     close(req_pipe_fd);
     // Wait for and handle the response
-    char response[BUFFER_SIZE];
-    if (read_response(response, sizeof(response)) != 0) {
+    int response = 0;
+    if (read_response(&response) != 0) {
         return 1;
     }
     return 0;
@@ -177,8 +175,8 @@ int ems_reserve(unsigned int event_id, size_t num_seats, size_t* xs, size_t* ys)
         fprintf(stderr, "[ERR]: write reserve request failed: %s\n", strerror(errno));
         return 1;
     }
-    char response[BUFFER_SIZE];
-    if (read_response(response, sizeof(response)) != 0) {
+    int response = 0;
+    if (read_response(&response) != 0) {
         return 1;
     }
     return 0;
