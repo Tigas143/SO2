@@ -17,12 +17,13 @@
 
 #define BUFFER_SIZE 500
 #define MAX_SESSIONS 10  // Defina o número máximo de sessões conforme necessário
-
+#define MAX_SERVER_LOG_IN 83
 typedef struct Session_Data{
     int session_id;
     char req_pipe_name[41];  // Assuming 40 characters for the name + 1 for null terminator
     char resp_pipe_name[41];
 }Session_Data;
+
 
 
 
@@ -58,10 +59,11 @@ void* handle_session(void* arg) {
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGUSR1);
     pthread_sigmask(SIG_BLOCK, &sigset, NULL);
+    req_pipe_fd = open(req_pipe_name_l, O_RDONLY);
+    rs = open(resp_pipe_name_l, O_WRONLY);
     while (1) {
         char buffer[BUFFER_SIZE];
         printf("%s\n", req_pipe_name_l);
-        req_pipe_fd = open(req_pipe_name_l, O_RDONLY);
         ssize_t ret = read(req_pipe_fd, buffer, BUFFER_SIZE - 1);
         if (ret == 0) {
             // ret == 0 indicates EOF
@@ -78,64 +80,70 @@ void* handle_session(void* arg) {
         switch (OP_CODE) {
             case 2:
                 close(req_pipe_fd);
+                close(rs);
+                // Update the active threads count
+                pthread_mutex_lock(&buffer_mutex);
+                active_threads--;
+                pthread_mutex_unlock(&buffer_mutex);
                 return NULL;
             case 3:
-                // Extract additional data
+                unsigned int session_id_create;  //session_id in the case
+                memcpy(&session_id_create, buffer + sizeof(char), sizeof(unsigned int));
+                memcpy(&event_id, buffer + sizeof(char) + sizeof(unsigned int), sizeof(unsigned int));
                 size_t num_rows, num_cols;
-                memcpy(&event_id, buffer + sizeof(char), sizeof(unsigned int));
-                memcpy(&num_rows, buffer + sizeof(char) + sizeof(unsigned int), sizeof(size_t));
-                memcpy(&num_cols, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(size_t), sizeof(size_t));
+                memcpy(&num_rows, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(unsigned int), sizeof(size_t));
+                memcpy(&num_cols, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(unsigned int) + sizeof(size_t), sizeof(size_t));
                 int result = ems_create(event_id, num_rows, num_cols);
-                rs = open(resp_pipe_name_l, O_WRONLY);
                 if (rs == -1) {
                     fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
                     exit(EXIT_FAILURE);
                 }
                 write(rs, &result, sizeof(result));
-                close(rs);
                 
                 fprintf(stderr, "[INFO]: Received OP_CODE 3\n");
 
                 break;
 
             case 4:
+                unsigned int session_id_reserve;  //session_id in the case
+                memcpy(&session_id_reserve, buffer + sizeof(char), sizeof(unsigned int));
+                memcpy(&event_id, buffer + sizeof(char) + sizeof(unsigned int), sizeof(unsigned int));
                 size_t num_seats;
-                memcpy(&event_id, buffer + sizeof(char), sizeof(unsigned int));
-                memcpy(&num_seats, buffer + sizeof(char) + sizeof(unsigned int), sizeof(size_t));
+                memcpy(&num_seats, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(unsigned int), sizeof(size_t));
                 size_t xs[MAX_RESERVATION_SIZE], ys[MAX_RESERVATION_SIZE];
-                memcpy(xs, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(size_t), num_seats * sizeof(size_t));
-                memcpy(ys, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(size_t) + num_seats * sizeof(size_t), num_seats * sizeof(size_t));
+                memcpy(xs, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(unsigned int) + sizeof(size_t), num_seats * sizeof(size_t));
+                memcpy(ys, buffer + sizeof(char) + sizeof(unsigned int) + sizeof(unsigned int) + sizeof(size_t) + num_seats * sizeof(size_t), num_seats * sizeof(size_t));
+            
                 result = ems_reserve(event_id, num_seats, xs, ys);
-                rs = open(resp_pipe_name_l, O_WRONLY);
                 if (rs == -1) {
                     fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
                     exit(EXIT_FAILURE);
                 }
                 write(rs, &result, sizeof(result));
-                close(rs);
                 fprintf(stderr, "[INFO]: Received OP_CODE 4\n");
                 break;
 
             case 5:
                 unsigned int *seats;
-                memcpy(&event_id, buffer + sizeof(char), sizeof(unsigned int));
+                unsigned int session_id_show;  //session_id in the case
+                memcpy(&session_id_show, buffer + sizeof(char), sizeof(unsigned int));
+                memcpy(&event_id, buffer + sizeof(char) + sizeof(unsigned int), sizeof(unsigned int));
                 size_t rows = get_event_rows(event_id);
                 size_t cols = get_event_cols(event_id);
                 
                 seats = (unsigned int*)malloc(rows*cols * sizeof(unsigned int));
-                rs = open(resp_pipe_name_l, O_WRONLY);
                 write(rs, &rows, sizeof(rows));
                 write(rs, &cols, sizeof(cols));
                 ems_show(event_id, seats);
                 write(rs, seats, rows*cols * sizeof(unsigned int));
-                close(rs);
                 fprintf(stderr, "[INFO]: Received OP_CODE 5\n");
 
 
                 break;
             case 6:
+                unsigned int session_id_list;  //session_id in the case
+                memcpy(&session_id_list, buffer + sizeof(char), sizeof(unsigned int));
                 int num_events = get_num_events();  
-                rs = open(resp_pipe_name_l, O_WRONLY);
                 if (rs == -1) {
                     fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
                     exit(EXIT_FAILURE);
@@ -151,7 +159,6 @@ void* handle_session(void* arg) {
                 write(rs, ids, (unsigned int)num_events * sizeof(unsigned int));
                 fprintf(stderr, "[INFO]: Received OP_CODE 6\n");
                 free(ids);
-                close(rs);
                 break;
 
 
@@ -218,7 +225,7 @@ void dequeue() {
 
 int main(int argc, char* argv[]) {
     int server_pipe_fd;
-    int id;
+    int id = 0;
     if (argc < 2 || argc > 3) {
         fprintf(stderr, "Usage: %s <pipe_path> [delay]\n", argv[0]);
         return 1;
@@ -258,7 +265,7 @@ int main(int argc, char* argv[]) {
         ssize_t ret = 0;
         // Read from the server pipe or request pipe based on the session
         char buffer[BUFFER_SIZE];
-        ret = read(server_pipe_fd, buffer, BUFFER_SIZE - 1);
+        ret = read(server_pipe_fd, buffer, MAX_SERVER_LOG_IN);
         pthread_mutex_lock(&signal_mutex);
         if (show_state_flag) {
             print_event_state();
@@ -288,6 +295,9 @@ int main(int argc, char* argv[]) {
                 session_data.resp_pipe_name[40] = '\0';  // Ensure null termination
                 fprintf(stderr, "[INFO]: Request Pipe: %s\n", session_data.req_pipe_name);
                 fprintf(stderr, "[INFO]: Response Pipe: %s\n", session_data.resp_pipe_name);
+                int rs = open(session_data.resp_pipe_name, O_WRONLY);
+                write(rs, &session_data.session_id, sizeof(session_data.session_id));
+                close(rs);
                 enqueue(session_data);
                 break;
             }

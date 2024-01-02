@@ -13,17 +13,17 @@
 
 char *req_pipe_path_g = NULL;
 char *resp_pipe_path_g = NULL;
-
+int req_pipe_fd = -1;
+int resp_pipe_fd = -1;
+int session_id;
 
 int read_response(int* response) {
-    int resp_pipe_fd = open(resp_pipe_path_g, O_RDONLY);
     if (resp_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
         return 1;
     }
 
     ssize_t bytes_read = read(resp_pipe_fd, response, sizeof(int));
-    close(resp_pipe_fd);
 
     if (bytes_read == -1) {
         fprintf(stderr, "[ERR]: read response failed: %s\n", strerror(errno));
@@ -92,15 +92,18 @@ int ems_setup(char const* req_pipe_path, char const* resp_pipe_path, char const*
         fprintf(stderr, "[ERR]: write failed: %s\n", strerror(errno));
         return 1;
     }
-
+    resp_pipe_fd = open(resp_pipe_path_g, O_RDONLY);
+    read(resp_pipe_fd, &session_id, sizeof(int));
+    printf("Session id: %d\n", session_id);
+    req_pipe_fd = open(req_pipe_path_g, O_WRONLY);
     printf("Sent setup message\n");
+    close(rx);
     return 0;
 }
 
 int ems_quit(void) {
     printf("reached quit\n");
     // Send quit request
-    int req_pipe_fd = open(req_pipe_path_g, O_WRONLY);
     if (req_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open request pipe failed: %s\n", strerror(errno));
         return 1;
@@ -124,26 +127,25 @@ int ems_quit(void) {
 
 int ems_create(unsigned int event_id, size_t num_rows, size_t num_cols) {
     // Send create request
-    int req_pipe_fd = open(req_pipe_path_g, O_WRONLY);
     if (req_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open request pipe failed: %s\n", strerror(errno));
         return 1;
     }
     char create_message[BUFFER_SIZE];
     char OP_CODE = 3;  // Change this according to your needs
-    size_t message_size = sizeof(char) + sizeof(unsigned int) + sizeof(size_t) +
+    size_t message_size = sizeof(char) + sizeof(int) + sizeof(unsigned int) + sizeof(size_t) +
                       sizeof(size_t);
     memcpy(create_message, &OP_CODE, sizeof(char));
-    memcpy(create_message + sizeof(char), &event_id, sizeof(unsigned int));
-    memcpy(create_message + sizeof(char) + sizeof(unsigned int), &num_rows, sizeof(size_t));
-    memcpy(create_message + sizeof(char) + sizeof(unsigned int) + sizeof(size_t), &num_cols, sizeof(size_t));
+    memcpy(create_message + sizeof(char), &session_id, sizeof(int));  // Include session_id in the create message
+    memcpy(create_message + sizeof(char) + sizeof(int), &event_id, sizeof(unsigned int));
+    memcpy(create_message + sizeof(char) + sizeof(int) + sizeof(unsigned int), &num_rows, sizeof(size_t));
+    memcpy(create_message + sizeof(char) + sizeof(int) + sizeof(unsigned int) + sizeof(size_t), &num_cols, sizeof(size_t));
 
     ssize_t bytes_written = write(req_pipe_fd, create_message, message_size);
     if (bytes_written == -1) {
         fprintf(stderr, "[ERR]: write create request failed: %s\n", strerror(errno));
         return 1;
     }
-    close(req_pipe_fd);
     // Wait for and handle the response
     int response = 0;
     if (read_response(&response) != 0) {
@@ -154,23 +156,24 @@ int ems_create(unsigned int event_id, size_t num_rows, size_t num_cols) {
 
 int ems_reserve(unsigned int event_id, size_t num_seats, size_t* xs, size_t* ys) {
     // Send reserve request
-    int req_pipe_fd = open(req_pipe_path_g, O_WRONLY);
     if (req_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open request pipe failed: %s\n", strerror(errno));
         return 1;
     }
-    size_t message_size = sizeof(char) + sizeof(unsigned int) + sizeof(size_t) +
+    
+
+     size_t message_size = sizeof(char) + sizeof(int) + sizeof(unsigned int) + sizeof(size_t) +
                       num_seats * sizeof(size_t) + num_seats * sizeof(size_t);
     char reserve_message[message_size];
     char OP_CODE = 4;  // Change this according to your needs
-
     memcpy(reserve_message, &OP_CODE, sizeof(char));
-    memcpy(reserve_message + sizeof(char), &event_id, sizeof(unsigned int));
-    memcpy(reserve_message + sizeof(char) + sizeof(unsigned int), &num_seats, sizeof(size_t));
-    memcpy(reserve_message + sizeof(char) + sizeof(unsigned int) + sizeof(size_t), xs, num_seats * sizeof(size_t));
-    memcpy(reserve_message + sizeof(char) + sizeof(unsigned int) + sizeof(size_t) + num_seats * sizeof(size_t), ys, num_seats * sizeof(size_t));
+    memcpy(reserve_message + sizeof(char), &session_id, sizeof(int));  // Include session_id in the reserve message
+    memcpy(reserve_message + sizeof(char) + sizeof(int), &event_id, sizeof(unsigned int));
+    memcpy(reserve_message + sizeof(char) + sizeof(int) + sizeof(unsigned int), &num_seats, sizeof(size_t));
+    memcpy(reserve_message + sizeof(char) + sizeof(int) + sizeof(unsigned int) + sizeof(size_t), xs, num_seats * sizeof(size_t));
+    memcpy(reserve_message + sizeof(char) + sizeof(int) + sizeof(unsigned int) + sizeof(size_t) + num_seats * sizeof(size_t), ys, num_seats * sizeof(size_t));
+
     ssize_t bytes_written = write(req_pipe_fd, reserve_message, message_size);
-    close(req_pipe_fd);
     if (bytes_written == -1) {
         fprintf(stderr, "[ERR]: write reserve request failed: %s\n", strerror(errno));
         return 1;
@@ -185,26 +188,25 @@ int ems_reserve(unsigned int event_id, size_t num_seats, size_t* xs, size_t* ys)
 int ems_show(int out_fd, unsigned int event_id) {
     // Send show request
     printf("%s\n", req_pipe_path_g);
-    int req_pipe_fd = open(req_pipe_path_g, O_WRONLY);
     if (req_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open request pipe failed: %s\n", strerror(errno));
         return 1;
     }
     char show_message[BUFFER_SIZE];
     char OP_CODE = 5;  // Change this according to your needs
-
+    size_t message_size = sizeof(char) + sizeof(int) + sizeof(unsigned int);
     memcpy(show_message, &OP_CODE, sizeof(char));
-    memcpy(show_message + sizeof(char), &event_id, sizeof(unsigned int));
+    memcpy(show_message + sizeof(char), &session_id, sizeof(int));  // Include session_id in the show message
+    memcpy(show_message + sizeof(char) + sizeof(int), &event_id, sizeof(unsigned int));
 
-    ssize_t bytes_written = write(req_pipe_fd, show_message, sizeof(show_message));
-    close(req_pipe_fd);
+
+    ssize_t bytes_written = write(req_pipe_fd, show_message, message_size);
     if (bytes_written == -1) {
         fprintf(stderr, "[ERR]: write show request failed: %s\n", strerror(errno));
         return 1;
     }
-    int resp_pipe_fd = open(resp_pipe_path_g, O_RDONLY);
     if (resp_pipe_fd == -1) {
-        fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
+        fprintf(stderr, "[ERR]:  response pipe failed: %s\n", strerror(errno));
         return 1;
     }
     size_t rows,cols;
@@ -232,14 +234,12 @@ int ems_show(int out_fd, unsigned int event_id) {
         // Write newline character after each row
         write(out_fd, "\n", 1);
     }
-    close(resp_pipe_fd);
     free(seats);
     return 0;
 }
 
 int ems_list_events(int out_fd) {
     // Send list events request
-    int req_pipe_fd = open(req_pipe_path_g, O_WRONLY);
     if (req_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open request pipe failed: %s\n", strerror(errno));
         return 1;
@@ -247,17 +247,18 @@ int ems_list_events(int out_fd) {
 
     char list_events_message[BUFFER_SIZE];
     char OP_CODE = 6;  // Change this according to your needs
-
+    size_t message_size = sizeof(char) + sizeof(int);
     memcpy(list_events_message, &OP_CODE, sizeof(char));
+    memcpy(list_events_message + sizeof(char), &session_id, sizeof(int));  // Include session_id in the list events message
 
-    ssize_t bytes_written = write(req_pipe_fd, list_events_message, strlen(list_events_message));
+
+    ssize_t bytes_written = write(req_pipe_fd, list_events_message, message_size);
 
     if (bytes_written == -1) {
         fprintf(stderr, "[ERR]: write list events request failed: %s\n", strerror(errno));
         return 1;
     }
     int num_events;
-    int resp_pipe_fd = open(resp_pipe_path_g, O_RDONLY);
     if (resp_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
         return 1;
