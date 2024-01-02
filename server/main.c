@@ -16,7 +16,7 @@
 #include <bits/types/sigset_t.h>
 
 #define BUFFER_SIZE 500
-#define MAX_SESSIONS 2  // Defina o número máximo de sessões conforme necessário
+#define MAX_SESSIONS 2 // Defina o número máximo de sessões conforme necessário
 #define MAX_SERVER_LOG_IN 83
 typedef struct Session_Data{
     int session_id;
@@ -91,16 +91,21 @@ Session_Data dequeue() {
 }
 
 void* handle_session(void* arg) {
+    int thread_id = *(int*)arg;
     while(1){
+        int rs;
         Session_Data session_data;
         session_data = dequeue();
+        session_data.session_id = thread_id;
+        rs = open(session_data.resp_pipe_name, O_WRONLY);
+        write(rs, &session_data.session_id, sizeof(session_data.session_id));
+        close(rs);
         printf("Here:%d\n", session_data.session_id);
         printf("Here:%s\n", session_data.req_pipe_name);
         printf("Here:%s\n", session_data.resp_pipe_name);
         char req_pipe_name_l[41];
         char resp_pipe_name_l[41];
         int req_pipe_fd;
-        int rs;
         unsigned int event_id;
         strcpy(req_pipe_name_l, session_data.req_pipe_name);
         req_pipe_name_l[40] = '\0';  // Ensure null termination
@@ -237,11 +242,68 @@ void* handle_session(void* arg) {
 
 
 
+pthread_t server_thread;
 
+void* server_read_thread(void* arg) {
+    int server_pipe_fd = *(int*)arg;
+    struct sigaction sa;
+    sa.sa_handler = sigusr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+    while (1) {
+        ssize_t ret = 0;
+        char buffer[BUFFER_SIZE];
+
+        ret = read(server_pipe_fd, buffer, MAX_SERVER_LOG_IN);
+
+        pthread_mutex_lock(&signal_mutex);
+        if (show_state_flag) {
+            print_event_state();
+            show_state_flag = 0;  // Reset the flag
+        }
+        pthread_mutex_unlock(&signal_mutex);
+
+        if (ret == -1) {
+            // ret == -1 indicates error
+            fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
+            break;
+        }
+
+        char OP_CODE = buffer[0];
+        switch (OP_CODE) {
+            case 1: {
+                // Handle OP_CODE 1
+                char req_pipe_path[40];
+                fprintf(stderr, "[INFO]: Received OP_CODE 1\n");
+
+                Session_Data session_data;
+                strncpy(req_pipe_path, buffer + 1, 40);
+                req_pipe_path[40] = '\0';  // Ensure null termination
+                strcpy(session_data.req_pipe_name, req_pipe_path);
+                strncpy(session_data.resp_pipe_name, buffer + 41, 40);
+                session_data.resp_pipe_name[40] = '\0';  // Ensure null termination
+                fprintf(stderr, "[INFO]: Request Pipe: %s\n", session_data.req_pipe_name);
+                fprintf(stderr, "[INFO]: Response Pipe: %s\n", session_data.resp_pipe_name);
+                enqueue(session_data);
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        buffer[ret] = '\0';
+    }
+
+    return NULL;
+}
 
 int main(int argc, char* argv[]) {
     int server_pipe_fd;
-    int id = 0;
     if (argc < 2 || argc > 3) {
         fprintf(stderr, "Usage: %s <pipe_path> [delay]\n", argv[0]);
         return 1;
@@ -268,70 +330,28 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
     server_pipe_fd = open(pipe_path, O_RDONLY);
-    // Set up the SIGUSR1 signal handler
-    struct sigaction sa;
-    sa.sa_handler = sigusr1_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(EXIT_FAILURE);
-    }
     for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (pthread_create(&worker_threads[i], NULL, handle_session, NULL) != 0) {
+        if (pthread_create(&worker_threads[i], NULL, handle_session, &i) != 0) {
             fprintf(stderr, "[ERR]: pthread_create failed\n");
             exit(EXIT_FAILURE);
         }
     }
-
-    while (1) {
-        ssize_t ret = 0;
-        // Read from the server pipe or request pipe based on the session
-        char buffer[BUFFER_SIZE];
-        ret = read(server_pipe_fd, buffer, MAX_SERVER_LOG_IN);
-        pthread_mutex_lock(&signal_mutex);
-        if (show_state_flag) {
-            print_event_state();
-            show_state_flag = 0;  // Reset the flag
-        }
-        pthread_mutex_unlock(&signal_mutex);
-        if (ret == -1) {
-            // ret == -1 indicates error
-            fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-            break;
-        }
-
-        char OP_CODE = buffer[0];
-        switch (OP_CODE) {
-            case 1: {
-                // Handle OP_CODE 1
-                char req_pipe_path[40];
-                fprintf(stderr, "[INFO]: Received OP_CODE 1\n");
-
-                Session_Data session_data;
-                session_data.session_id = id;
-                id++;
-                strncpy(req_pipe_path, buffer + 1, 40);
-                req_pipe_path[40] = '\0';  // Ensure null termination
-                strcpy(session_data.req_pipe_name, req_pipe_path);
-                strncpy(session_data.resp_pipe_name, buffer + 41, 40);
-                session_data.resp_pipe_name[40] = '\0';  // Ensure null termination
-                fprintf(stderr, "[INFO]: Request Pipe: %s\n", session_data.req_pipe_name);
-                fprintf(stderr, "[INFO]: Response Pipe: %s\n", session_data.resp_pipe_name);
-                int rs = open(session_data.resp_pipe_name, O_WRONLY);
-                write(rs, &session_data.session_id, sizeof(session_data.session_id));
-                close(rs);
-                enqueue(session_data);
-                break;
-            }
-
-            default:
-                break;
-        }
-
-        buffer[ret] = '\0';
+    if (pthread_create(&server_thread, NULL, server_read_thread, &server_pipe_fd) != 0) {
+        fprintf(stderr, "[ERR]: pthread_create for server read thread failed\n");
+        exit(EXIT_FAILURE);
     }
-
+    while(1){
+    }
+    if (pthread_join(server_thread, NULL) != 0) {
+        fprintf(stderr, "[ERR]: pthread_join for server read thread failed\n");
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+        if (pthread_join(worker_threads[i], NULL) != 0) {
+            fprintf(stderr, "[ERR]: pthread_join for server read thread failed\n");
+            exit(EXIT_FAILURE);
+        }
+    }
     // Close file descriptors and unlink pipe
     close(server_pipe_fd);
     unlink(pipe_path);
