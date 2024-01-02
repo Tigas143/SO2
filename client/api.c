@@ -267,6 +267,9 @@ int ems_list_events(int out_fd) {
     unsigned int* ids = malloc((unsigned int)num_events * sizeof(unsigned int));
     bytes_read = read(resp_pipe_fd, ids, (unsigned int)num_events * sizeof(unsigned int));
     // Write event IDs to out_fd in the specified format
+    if (num_events == 0) {
+        write(out_fd, "No events\n", 10);
+    }
     for (int i = 0; i < num_events; i++) {
         char buffer[32];  // Adjust the buffer size as needed
         int written = snprintf(buffer, sizeof(buffer), "Event: %u\n", ids[i]);
