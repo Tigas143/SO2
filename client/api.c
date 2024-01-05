@@ -209,10 +209,19 @@ int ems_show(int out_fd, unsigned int event_id) {
         fprintf(stderr, "[ERR]:  response pipe failed: %s\n", strerror(errno));
         return 1;
     }
+    int result;
     size_t rows,cols;
     unsigned int *seats;
-    ssize_t bytes_read = read(resp_pipe_fd, &rows, sizeof(size_t));
+    ssize_t bytes_read = read(resp_pipe_fd, &result, sizeof(int));
+    if(result == 1){
+        return 1;
+    }
+    bytes_read = read(resp_pipe_fd, &rows, sizeof(size_t));
     bytes_read = read(resp_pipe_fd, &cols, sizeof(size_t));
+    if(bytes_read == -1){
+        fprintf(stderr, "[ERR]: read show request failed: %s\n", strerror(errno));
+        return 1;
+    }
     printf("rows: %ld\n", rows);
     printf("cols: %ld\n", cols);
     seats = (unsigned int*)malloc(rows*cols * sizeof(unsigned int));
@@ -258,12 +267,20 @@ int ems_list_events(int out_fd) {
         fprintf(stderr, "[ERR]: write list events request failed: %s\n", strerror(errno));
         return 1;
     }
-    int num_events;
+    int num_events, result;
     if (resp_pipe_fd == -1) {
         fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
         return 1;
     }
-    ssize_t bytes_read = read(resp_pipe_fd, &num_events, sizeof(int));
+    ssize_t bytes_read = read(resp_pipe_fd, &result, sizeof(int));
+    if(result == 1){
+        return 1;
+    }
+    bytes_read = read(resp_pipe_fd, &num_events, sizeof(int));
+    if (bytes_read == -1) {
+        fprintf(stderr, "[ERR]: read list events request failed: %s\n", strerror(errno));
+        return 1;
+    }
     unsigned int* ids = malloc((unsigned int)num_events * sizeof(unsigned int));
     bytes_read = read(resp_pipe_fd, ids, (unsigned int)num_events * sizeof(unsigned int));
     // Write event IDs to out_fd in the specified format

@@ -16,40 +16,44 @@
 #include <bits/types/sigset_t.h>
 
 #define BUFFER_SIZE 500
-#define MAX_SESSIONS 2 // Defina o número máximo de sessões conforme necessário
+#define MAX_THREADS 3 // Defina o número máximo de sessões conforme necessário
 #define MAX_SERVER_LOG_IN 83
+// data of each ems session
 typedef struct Session_Data{
     int session_id;
-    char req_pipe_name[41];  // Assuming 40 characters for the name + 1 for null terminator
+    char req_pipe_name[41];  
     char resp_pipe_name[41];
 }Session_Data;
 
+// Linked list node
 typedef struct Node {
     Session_Data data;
     struct Node* next;
 } Node;
 
+// Linked list head and tail initialization
 Node* head = NULL;
 Node* tail = NULL;
 
 
-
+// global variables
 volatile sig_atomic_t show_state_flag = 0;
 pthread_mutex_t signal_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_t worker_threads[MAX_SESSIONS];
+pthread_t worker_threads[MAX_THREADS];
 pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t buffer_not_empty = PTHREAD_COND_INITIALIZER;
 
 int in = 0, out = 0, active_threads = 0;
-
-void sigusr1_handler(int signo) {
+int thread_ids[MAX_THREADS];
+// handle sigusr1 signal
+void sigusr1_handler() {
     pthread_mutex_lock(&signal_mutex);
     show_state_flag = 1;
     pthread_mutex_unlock(&signal_mutex);
 }
 
 
-
+// put session data into the buffer
 void enqueue(Session_Data request) {
     Node* new_node = (Node*)malloc(sizeof(Node));
     if (new_node == NULL) {
@@ -73,6 +77,7 @@ void enqueue(Session_Data request) {
     pthread_mutex_unlock(&buffer_mutex);
 }
 
+// threads get session data from the buffer and remove it from buffer
 Session_Data dequeue() {
     pthread_mutex_lock(&buffer_mutex);
     while (head == NULL) {
@@ -90,6 +95,7 @@ Session_Data dequeue() {
     return data;
 }
 
+// handles each client session
 void* handle_session(void* arg) {
     int thread_id = *(int*)arg;
     while(1){
@@ -187,10 +193,15 @@ void* handle_session(void* arg) {
                     size_t rows = get_event_rows(event_id);
                     size_t cols = get_event_cols(event_id);
                     
-                    seats = (unsigned int*)malloc(rows*cols * sizeof(unsigned int));
+                    seats = (unsigned int*)malloc(rows*cols * sizeof(unsigned int));   
+                    result = ems_show(event_id, seats);
+                    write(rs, &result, sizeof(int));
+                    if(result == 1){
+                        fprintf(stderr, "[INFO]: Received OP_CODE 5\n");
+                        break;
+                    }
                     write(rs, &rows, sizeof(rows));
                     write(rs, &cols, sizeof(cols));
-                    ems_show(event_id, seats);
                     write(rs, seats, rows*cols * sizeof(unsigned int));
                     fprintf(stderr, "[INFO]: Received OP_CODE 5\n");
 
@@ -204,14 +215,16 @@ void* handle_session(void* arg) {
                         fprintf(stderr, "[ERR]: open response pipe failed: %s\n", strerror(errno));
                         exit(EXIT_FAILURE);
                     }
-                    write(rs, &num_events, sizeof(num_events));
                     // Allocate memory for ids dynamically
                     unsigned int* ids = malloc((unsigned int)num_events * sizeof(unsigned int));
                     if (ids == NULL) {
                         fprintf(stderr, "[ERR]: Memory allocation failed\n");
                         exit(EXIT_FAILURE);
                     }
-                    ems_list_events(ids, num_events);
+                    result = ems_list_events(ids, num_events);
+                    write(rs, &result, sizeof(int));
+                    write(rs, &num_events, sizeof(num_events));
+
                     write(rs, ids, (unsigned int)num_events * sizeof(unsigned int));
                     fprintf(stderr, "[INFO]: Received OP_CODE 6\n");
                     free(ids);
@@ -242,8 +255,8 @@ void* handle_session(void* arg) {
 
 
 
-pthread_t server_thread;
 
+// handles server requests
 void* server_read_thread(void* arg) {
     int server_pipe_fd = *(int*)arg;
     struct sigaction sa;
@@ -261,12 +274,12 @@ void* server_read_thread(void* arg) {
         ret = read(server_pipe_fd, buffer, MAX_SERVER_LOG_IN);
 
         pthread_mutex_lock(&signal_mutex);
+        // if signal sigusr1 is received, print the state
         if (show_state_flag) {
             print_event_state();
             show_state_flag = 0;  // Reset the flag
         }
         pthread_mutex_unlock(&signal_mutex);
-
         if (ret == -1) {
             // ret == -1 indicates error
             fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
@@ -303,6 +316,7 @@ void* server_read_thread(void* arg) {
 }
 
 int main(int argc, char* argv[]) {
+    pthread_t server_thread;
     int server_pipe_fd;
     if (argc < 2 || argc > 3) {
         fprintf(stderr, "Usage: %s <pipe_path> [delay]\n", argv[0]);
@@ -330,8 +344,9 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
     server_pipe_fd = open(pipe_path, O_RDONLY);
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-        if (pthread_create(&worker_threads[i], NULL, handle_session, &i) != 0) {
+    for (int i = 0; i < MAX_THREADS; ++i) {
+        thread_ids[i] = i;
+        if (pthread_create(&worker_threads[i], NULL, handle_session, &thread_ids[i]) != 0) {
             fprintf(stderr, "[ERR]: pthread_create failed\n");
             exit(EXIT_FAILURE);
         }
@@ -346,7 +361,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "[ERR]: pthread_join for server read thread failed\n");
         exit(EXIT_FAILURE);
     }
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
+    for (int i = 0; i < MAX_THREADS; ++i) {
         if (pthread_join(worker_threads[i], NULL) != 0) {
             fprintf(stderr, "[ERR]: pthread_join for server read thread failed\n");
             exit(EXIT_FAILURE);
